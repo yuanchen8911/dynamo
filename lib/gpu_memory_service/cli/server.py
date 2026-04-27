@@ -3,7 +3,12 @@
 
 """GMS server entry point.
 
-Launches two GMS server processes per GPU (one for weights, one for kv_cache).
+Launches GMS server processes per GPU. By default: one for weights, one for
+kv_cache. Under intra-pod failover (set GMS_FAILOVER_ENGINE_COUNT=N), spawns
+N independent kv_cache servers tagged kv_cache_0..kv_cache_{N-1}, one per
+engine container. Each engine connects RW exclusive on its own kv_cache
+socket; the weights socket stays shared.
+
 Writes a ready file once all expected UDS sockets are present. Runs until
 SIGTERM (pod termination kills it).
 """
@@ -27,8 +32,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_TAGS = ("weights", "kv_cache")
 _READY_FILE = "gms-ready"
+
+
+def _kv_cache_tags() -> tuple[str, ...]:
+    """Return the kv_cache tag(s) to spawn based on failover engine count.
+
+    Default (no failover): ("kv_cache",) — preserves existing behavior.
+    With GMS_FAILOVER_ENGINE_COUNT=N>=2: ("kv_cache_0", ..., "kv_cache_{N-1}")
+    so each engine container has its own kv_cache server and RW lock.
+    """
+    raw = os.environ.get("GMS_FAILOVER_ENGINE_COUNT")
+    try:
+        count = int(raw) if raw else 1
+    except ValueError:
+        logger.warning("Invalid GMS_FAILOVER_ENGINE_COUNT=%r; defaulting to 1", raw)
+        count = 1
+    if count <= 1:
+        return ("kv_cache",)
+    return tuple(f"kv_cache_{i}" for i in range(count))
+
+
+def _all_tags() -> tuple[str, ...]:
+    return ("weights",) + _kv_cache_tags()
 
 
 def main() -> None:
@@ -36,9 +62,11 @@ def main() -> None:
     ready_file.unlink(missing_ok=True)
 
     devices = list_devices()
+    tags = _all_tags()
+    logger.info("Spawning GMS servers for tags=%s on devices=%s", tags, devices)
     processes = []
     for device in devices:
-        for tag in _TAGS:
+        for tag in tags:
             proc = subprocess.Popen(
                 [
                     sys.executable,
@@ -71,7 +99,7 @@ def main() -> None:
             sockets_ready = all(
                 os.path.exists(get_socket_path(device, tag))
                 for device in devices
-                for tag in _TAGS
+                for tag in tags
             )
             if sockets_ready:
                 ready_file.write_text("ready", encoding="utf-8")

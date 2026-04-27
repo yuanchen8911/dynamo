@@ -115,64 +115,6 @@ def _create_mem_pool() -> "MemPool":
     return MemPool(allocator=_pluggable_alloc.allocator())
 
 
-def get_or_create_kv_cache_scratch_pool(
-    socket_path: str,
-    device: int,
-) -> "MemPool":
-    """Register a kv_cache manager without connecting to the server, return MemPool.
-
-    Plan A init path: the shadow engine allocates kv_cache tensors over
-    scratch-aliased physical, which is entirely client-local (cuMemCreate +
-    cuMemMap). We deliberately do NOT connect to the GMS kv_cache server at
-    init — that would take the RW lock and prevent sibling shadow engines from
-    initializing.
-
-    At wake, GMSWorker.wake_up calls `manager.connect(RW)` on the same
-    manager before invoking `commit_real_backing`. Only the engine that wins
-    the flock ever takes the RW lock, matching pre-Plan-A semantics.
-
-    If a manager already exists for tag="kv_cache", returns its pool
-    (assuming it was set up the same way).
-    """
-    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-
-    tag = "kv_cache"
-    existing = _tag_states.get(tag)
-    if existing is not None:
-        if existing.socket_path != socket_path or existing.device != device:
-            raise RuntimeError(
-                f"GMS allocator tag={tag} was initialized for "
-                f"{existing.socket_path} on device {existing.device}, not {socket_path} "
-                f"on device {device}"
-            )
-        if existing.mem_pool is None:
-            raise RuntimeError(
-                f"GMS allocator tag={tag} exists but has no mempool; "
-                "cannot reuse for scratch"
-            )
-        return existing.mem_pool
-
-    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
-    # Intentionally do NOT call manager.connect(): scratch operations are
-    # process-local and don't need a GMS session. The session is created by
-    # the caller at wake time via manager.connect(RequestedLockType.RW).
-
-    _ensure_callbacks_initialized()
-    mem_pool = _create_mem_pool()
-
-    _tag_states[tag] = _TagState(
-        manager=manager,
-        mem_pool=mem_pool,
-        socket_path=socket_path,
-        device=device,
-    )
-    logger.info(
-        "[Plan A] Created unconnected kv_cache manager for scratch (device=%d)",
-        device,
-    )
-    return mem_pool
-
-
 def get_or_create_gms_client_memory_manager(
     socket_path: str,
     device: int,

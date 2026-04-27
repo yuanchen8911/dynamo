@@ -566,6 +566,27 @@ func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 	}
 }
 
+func TestBuildFailoverPod_SetsGMSFailoverEngineCount(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	gms.EnsureServerSidecar(&ps, &ps.Containers[0])
+
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	require.NoError(t, err)
+
+	var server *corev1.Container
+	for i := range ps.InitContainers {
+		if ps.InitContainers[i].Name == gms.ServerContainerName {
+			server = &ps.InitContainers[i]
+			break
+		}
+	}
+	require.NotNil(t, server, "gms-server initContainer should be present")
+
+	env := envToMap(server.Env)
+	assert.Equal(t, "2", env[gms.EnvFailoverEngineCount],
+		"gms-server should be told to spawn one kv_cache subprocess per engine")
+}
+
 func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)

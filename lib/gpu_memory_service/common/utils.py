@@ -60,3 +60,21 @@ def wait_for_weights_socket(device: int) -> None:
     path = get_socket_path(device, "weights")
     while not os.path.exists(path):
         time.sleep(0.1)
+
+
+def kv_cache_socket_tag() -> str:
+    """Resolve the kv_cache GMS socket tag for this engine.
+
+    Under intra-pod failover, the operator stamps GMS_FAILOVER_ENGINE_COUNT on
+    the gms-server sidecar (which spawns kv_cache_0..kv_cache_{N-1}) and
+    ENGINE_ID on each engine container. Each engine connects RW to its own
+    kv_cache socket, eliminating cross-engine RW lock contention without
+    needing multi-writer support on the server.
+
+    Without ENGINE_ID set (single-engine, non-failover deployments), returns
+    the legacy "kv_cache" tag so the existing socket name is preserved.
+    """
+    engine_id = os.environ.get("ENGINE_ID")
+    if engine_id is None or engine_id == "":
+        return "kv_cache"
+    return f"kv_cache_{engine_id}"

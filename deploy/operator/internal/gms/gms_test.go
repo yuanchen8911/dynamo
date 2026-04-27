@@ -76,6 +76,55 @@ func TestEnsureServerSidecarDoesNotAddCheckpointControl(t *testing.T) {
 	}
 }
 
+func TestSetFailoverEngineCount(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "test:latest"}},
+	}
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
+
+	SetFailoverEngineCount(podSpec, 2)
+	server := &podSpec.InitContainers[0]
+	assert.Equal(t, "2", envValue(t, server, EnvFailoverEngineCount))
+
+	// Idempotent: second call updates in place rather than appending.
+	SetFailoverEngineCount(podSpec, 3)
+	assert.Equal(t, "3", envValue(t, server, EnvFailoverEngineCount))
+
+	count := 0
+	for _, e := range server.Env {
+		if e.Name == EnvFailoverEngineCount {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "should not duplicate the env var")
+}
+
+func TestSetFailoverEngineCountNoOpUnderOne(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "test:latest"}},
+	}
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
+
+	SetFailoverEngineCount(podSpec, 1)
+	SetFailoverEngineCount(podSpec, 0)
+
+	server := &podSpec.InitContainers[0]
+	for _, e := range server.Env {
+		if e.Name == EnvFailoverEngineCount {
+			t.Fatalf("env %s should not be set for count<=1", EnvFailoverEngineCount)
+		}
+	}
+}
+
+func TestSetFailoverEngineCountWithoutSidecarIsNoOp(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "test:latest"}},
+	}
+	// No sidecar added; should not panic, should not append anything.
+	SetFailoverEngineCount(podSpec, 2)
+	assert.Empty(t, podSpec.InitContainers)
+}
+
 func envValue(t *testing.T, container *corev1.Container, name string) string {
 	t.Helper()
 	for _, env := range container.Env {

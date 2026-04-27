@@ -431,6 +431,11 @@ func buildFailoverPod(
 
 	podSpec.Containers = append(engines, sidecars...)
 
+	// Tell the gms-server sidecar to spawn one kv_cache subprocess per engine
+	// (kv_cache_0..kv_cache_{N-1}). Each engine connects RW to its own socket,
+	// eliminating cross-engine RW lock contention.
+	gmsruntime.SetFailoverEngineCount(podSpec, failoverEngineCount)
+
 	// Backend-specific overrides
 	switch backendFramework {
 	case BackendFrameworkVLLM:

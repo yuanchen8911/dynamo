@@ -23,11 +23,10 @@ from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
 from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
-    get_or_create_kv_cache_scratch_pool,
     gms_use_mem_pool,
 )
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import get_socket_path, kv_cache_socket_tag
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
@@ -143,38 +142,33 @@ class GMSWorker(Worker):
     def initialize_from_config(self, kv_cache_config) -> None:
         """Allocate KV cache through the GMS kv_cache mempool.
 
-        Plan A (shadow mode): the shadow engine allocates full-shape KV tensors
-        at init over scratch-aliased backing (one physical chunk per tensor,
-        mapped at every granule of its VA range). The scratch allocation is
-        purely client-local — no GMS server connection, no RW lock taken.
-        This matches pre-Plan-A's invariant that only the winning engine ever
-        holds the kv_cache RW lock (deferred to wake time).
+        Each engine connects RW to its own per-engine kv_cache GMS server.
+        Under intra-pod failover the operator spawns one kv_cache socket per
+        engine (kv_cache_0, kv_cache_1, ...) so there is no cross-engine RW
+        contention; each engine is a single writer on its own server.
 
-        At wake, GMSWorker.wake_up calls manager.connect(RW) on the same
-        manager and then commit_real_backing() swaps scratch for real
-        per-tensor physical at the same VAs. Captured cudagraphs see VAs,
-        not physical, so replay works post-swap.
+        Shadow engines additionally allocate KV tensors over scratch-aliased
+        backing (one small physical chunk mapped at every granule of the
+        tensor's VA range) to keep total GPU memory ≈ 1× the active engine's
+        budget. At wake, commit_real_backing swaps scratch for real
+        per-chunk physical at the same VAs; captured cudagraphs continue
+        to work because they reference VAs, not physical pages.
 
-        Non-shadow with enable_sleep_mode: uses the existing connect-RW-at-init
-        path (single writer, no contention issue).
+        Non-shadow with enable_sleep_mode: same connect-RW path, regular
+        allocations (no scratch trick — there is no sibling engine to
+        coexist with).
         """
         from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         device = self.local_rank
-        if is_shadow_mode():
-            # Plan A: create unconnected kv_cache manager for scratch only.
-            get_or_create_kv_cache_scratch_pool(
-                get_socket_path(device, "kv_cache"),
-                device,
-            )
-            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
-        elif self.vllm_config.model_config.enable_sleep_mode:
-            # Non-shadow sleep-mode path (no sibling engines, no contention).
+        wants_gms_kv = (
+            is_shadow_mode() or self.vllm_config.model_config.enable_sleep_mode
+        )
+        if wants_gms_kv:
             get_or_create_gms_client_memory_manager(
-                get_socket_path(device, "kv_cache"),
+                get_socket_path(device, kv_cache_socket_tag()),
                 device,
                 mode=RequestedLockType.RW,
                 tag="kv_cache",
@@ -182,7 +176,6 @@ class GMSWorker(Worker):
             with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
-            # No GMS for kv_cache: plain init.
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def load_model(self, *args, **kwargs) -> None:
@@ -242,13 +235,11 @@ class GMSWorker(Worker):
         if kv_cache_manager is None:
             logger.info("[GMS] No kv_cache manager, skipping kv_cache sleep")
         elif kv_cache_manager.has_plan_a_scratch:
-            # Plan A scratch state: scratch backing stays live, no GMS session
-            # was opened at init, so nothing to release here. The flock waiter
-            # runs after this; on wake we'll connect RW and commit.
-            logger.info(
-                "[Plan A] Sleep: kept scratch-aliased backing "
-                "(no GMS session to release)"
-            )
+            # Shadow scratch state: leave scratch backing mapped and the GMS
+            # session open. There's no contention to release — each engine
+            # has its own kv_cache server. On wake, commit_real_backing
+            # swaps scratch for real per-chunk physical at the same VAs.
+            logger.info("[GMS] Sleep: kept scratch-aliased KV backing")
         else:
             assert not kv_cache_manager.is_unmapped, "GMS KV cache is already unmapped"
             kv_cache_manager.unmap_all_vas()
@@ -270,8 +261,9 @@ class GMSWorker(Worker):
         """vLLM wake implementation with GMS integration.
 
         For kv_cache, handles two cases:
-        1. Plan A (shadow wake): scratch-aliased backing was installed at
-           init; swap to unique per-chunk physical at the same VAs.
+        1. Shadow wake: scratch-aliased backing was installed at init over
+           the engine's own kv_cache GMS (already RW); swap to unique
+           per-chunk physical at the same VAs via commit_real_backing.
         2. Normal sleep/wake: reconnect + reallocate + remap.
         """
         if (
@@ -312,26 +304,12 @@ class GMSWorker(Worker):
         if "kv_cache" in tags:
             kv_cache_manager = get_gms_client_memory_manager("kv_cache")
             if kv_cache_manager is not None and kv_cache_manager.has_plan_a_scratch:
-                # Plan A: swap scratch-aliased backing for real per-tensor physical
-                # at the same VAs. Cudagraphs captured at init continue to work.
-                # This is the FIRST connection to kv_cache GMS (init was local-only),
-                # matching pre-Plan-A "only the winner holds RW" semantics.
-                logger.info("[Plan A] wake: committing real backing for kv_cache")
-                if not kv_cache_manager.is_connected:
-                    try:
-                        kv_cache_manager.connect(
-                            RequestedLockType.RW, timeout_ms=30_000
-                        )
-                    except TimeoutError:
-                        logger.error(
-                            "Fatal: Plan A kv_cache wake timed out waiting for RW"
-                        )
-                        sys.exit(1)
-                    except ConnectionError as e:
-                        logger.error(
-                            "Fatal: Plan A kv_cache wake connection error: %s", e
-                        )
-                        sys.exit(1)
+                # Shadow wake path. The manager has been connected RW since
+                # init (each engine has its own kv_cache server, no
+                # contention). Swap scratch-aliased backing for real
+                # per-chunk physical at the same VAs. Cudagraphs captured at
+                # init continue to work because they reference VAs.
+                logger.info("[GMS] wake: committing real KV backing")
                 kv_cache_manager.commit_real_backing()
                 # NixlConnector registration was deferred during scratch phase
                 # (patches.patch_register_kv_caches). Fire it now against the
