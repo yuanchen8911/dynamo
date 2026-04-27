@@ -203,25 +203,16 @@ pub fn detect_tool_call_start_harmony(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of the single-call happy path also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Missing-end-token recovery
+    // is N/A for harmony (no section-end concept). Keep these inline tests
+    // as the parser-specific regression moat; trim duplicated coverage once
+    // the contract suite stabilizes.
     use super::*;
 
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
         (call.function.name, args)
-    }
-
-    #[tokio::test] // CASE.1, CASE.19
-    async fn test_parse_tool_calls_harmony_complete_basic() {
-        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
-        let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
-        let (name, args) = extract_name_and_args(tool_calls[0].clone());
-        assert_eq!(name, "get_current_weather");
-        assert_eq!(args["location"], "San Francisco");
-        assert_eq!(args["format"], "celsius");
     }
 
     #[tokio::test] // CASE.4, CASE.19

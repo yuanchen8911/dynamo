@@ -282,6 +282,10 @@ fn parse_tool_call_block(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
 
     fn get_test_config() -> Glm47ParserConfig {
@@ -304,25 +308,6 @@ mod tests {
 
         // No tool call
         assert!(!detect_tool_call_start_glm47("Just normal text", &config));
-    }
-
-    #[test] // CASE.1
-    fn test_parse_simple_tool_call() {
-        let config = get_test_config();
-        let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call>";
-
-        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
-
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "get_weather");
-
-        let args: HashMap<String, Value> =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(
-            args.get("location").unwrap().as_str().unwrap(),
-            "San Francisco"
-        );
-        assert_eq!(normal_text, Some("".to_string()));
     }
 
     #[test] // CASE.1, CASE.7

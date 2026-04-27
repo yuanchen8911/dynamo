@@ -27,7 +27,7 @@ fn strip_quotes(s: &str) -> &str {
 }
 
 /// Check if a chunk contains the start of a xml-style tool call.
-/// Format: <tool_call><function=name><parameter=foo>...</parameter></function></tool_call>
+/// Format: `<tool_call><function=name><parameter=foo>...</parameter></function></tool_call>`
 pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool {
     // Check for complete or partial start token.
     let start_token = &config.tool_call_start_token;
@@ -87,7 +87,7 @@ pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) ->
 }
 
 /// Try to parse Qwen3Coder formatted tool calls from a message.
-/// Format: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+/// Format: `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`
 /// Returns (parsed_tool_calls, normal_text_content)
 pub fn try_tool_call_parse_xml(
     message: &str,
@@ -154,7 +154,7 @@ fn extract_tool_calls(
 }
 
 /// Parse a single tool call block
-/// Format: <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
+/// Format: `<tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>`
 fn parse_tool_call_block(
     block: &str,
     config: &XmlParserConfig,
@@ -586,6 +586,10 @@ fn html_unescape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
     use rstest::rstest;
 
@@ -682,26 +686,6 @@ mod tests {
     #[case("&quot;quoted&quot;", "\"quoted\"", "quotes")]
     fn test_html_unescape(#[case] input: &str, #[case] expected: &str, #[case] _description: &str) {
         assert_eq!(html_unescape(input), expected);
-    }
-
-    #[test] // CASE.1
-    fn test_parse_simple_tool_call() {
-        let input = r#"<tool_call>
-<function=execute_bash>
-<parameter=command>
-pwd && ls
-</parameter>
-</function>
-</tool_call>"#;
-
-        let (calls, normal) =
-            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "execute_bash");
-        assert_eq!(normal, Some("".to_string()));
-
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["command"], "pwd && ls");
     }
 
     #[test] // CASE.1, CASE.7

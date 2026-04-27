@@ -255,6 +255,10 @@ fn parse_parameters(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
 
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
@@ -323,7 +327,7 @@ mod tests {
     // TODO — not yet covered for V4:
     //   - CASE.5  Fix mid-stream truncation: parser currently drops all calls when
     //             </｜DSML｜tool_calls> is absent (max_tokens / EOS before close).
-    //             Same class as Kimi K2 pre-DIS-1765. Recovery pattern: scan for
+    //             Same class as Kimi K2 pre-PR #8208. Recovery pattern: scan for
     //             complete <｜DSML｜invoke>...</｜DSML｜invoke> pairs even without
     //             the outer close fence (see kimi_k2_parser.rs for precedent).
     //             Pinning tests below capture the current silent-drop behavior;
@@ -372,34 +376,6 @@ mod tests {
         let text = "<｜DSML｜tool_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜tool_calls>more";
         let pos = find_tool_call_end_position_dsml(text, &config);
         assert_eq!(&text[pos..], "more");
-    }
-
-    #[test] // CASE.1
-    fn test_parse_single_tool_call_string_param() {
-        let input = r#"<｜DSML｜function_calls>
-<｜DSML｜invoke name="get_weather">
-<｜DSML｜parameter name="location" string="true">San Francisco</｜DSML｜parameter>
-</｜DSML｜invoke>
-</｜DSML｜function_calls>"#;
-
-        let config = get_test_config();
-        let result = try_tool_call_parse_dsml(input, &config);
-        if let Err(e) = &result {
-            eprintln!("Parse error: {:?}", e);
-        }
-        let (calls, normal) = result.unwrap();
-
-        if calls.is_empty() {
-            eprintln!("Input: {}", input);
-            eprintln!("No calls parsed!");
-        }
-
-        assert_eq!(calls.len(), 1, "Expected 1 tool call, got {}", calls.len());
-        assert_eq!(normal, Some("".to_string()));
-
-        let (name, args) = extract_name_and_args(calls[0].clone());
-        assert_eq!(name, "get_weather");
-        assert_eq!(args["location"], "San Francisco");
     }
 
     #[test] // CASE.1, CASE.7
